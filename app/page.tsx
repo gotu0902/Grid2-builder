@@ -10,6 +10,7 @@ export default function Home() {
   const [cols, setCols] = useState(4);
   const [anchor, setAnchor] = useState("TOPLEFT");
   const [orientation, setOrientation] = useState("HORIZONTAL");
+  const [myRealm, setMyRealm] = useState("Tarren Mill");
   
   // STANDARD ER NÅ EMPTY:
   const [roster, setRoster] = useState<any[]>([]);
@@ -40,6 +41,7 @@ export default function Home() {
     const savedCols = localStorage.getItem("raidCols");
     const savedAnchor = localStorage.getItem("raidAnchor");
     const savedOrientation = localStorage.getItem("raidOrientation");
+    const savedRealm = localStorage.getItem("raidMyRealm");
 
     if (savedGrid) setGrid(JSON.parse(savedGrid));
     if (savedRoster) setRoster(JSON.parse(savedRoster));
@@ -47,6 +49,7 @@ export default function Home() {
     if (savedCols) setCols(JSON.parse(savedCols));
     if (savedAnchor) setAnchor(savedAnchor);
     if (savedOrientation) setOrientation(savedOrientation);
+    if (savedRealm) setMyRealm(savedRealm);
 
     setIsLoaded(true);
   }, []);
@@ -59,8 +62,9 @@ export default function Home() {
       localStorage.setItem("raidCols", JSON.stringify(cols));
       localStorage.setItem("raidAnchor", anchor);
       localStorage.setItem("raidOrientation", orientation);
+      localStorage.setItem("raidMyRealm", myRealm);
     }
-  }, [grid, roster, rows, cols, anchor, orientation, isLoaded]);
+  }, [grid, roster, rows, cols, anchor, orientation, myRealm,isLoaded]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -201,7 +205,7 @@ export default function Home() {
   };
 
   const handleAddManualPlayer = (name: string, playerClass: string, role: string) => {
-    if (!name.trim()) return showAlert("Feil", "Vennligst skriv inn et navn først.");
+    if (!name.trim()) return showAlert("Woops!", "Please enter a name first.");
     const newPlayer = {
       id: "manual_" + Date.now(),
       name: name.trim(),
@@ -231,9 +235,30 @@ export default function Home() {
     });
 
   const handleExport = () => {
-    const exportString = grid.filter(slot => slot !== null).map(p => p.server ? `${p.name}-${p.server}` : p.name).join(", ");
+    // Sjekk om realm er valgt
+    if (!myRealm) {
+      showAlert("Missing realm", "You have to choose your own realm, otherwise Grid will tell you to fuck off.");
+      return;
+    }
+
+    const normalize = (str: string) => str.replace(/\s+/g, '').toLowerCase();
+
+    const exportString = grid
+      .filter(slot => slot !== null)
+      .map(p => {
+        if (!p.server) return p.name;
+        
+        // Sammenligner normaliserte servernavn
+        if (normalize(p.server) === normalize(myRealm)) {
+          return p.name;
+        }
+
+        return `${p.name}-${p.server}`;
+      })
+      .join(", ");
+      
     navigator.clipboard.writeText(exportString);
-    showAlert("Exported!", "The following is copied to the clipboard and ready for Grid2:\n\n" + exportString);
+    showAlert("Exported!", "The following is copied to the clipboard:\n\n" + exportString);
   };
 
   const getGridStyle = () => ({
@@ -272,7 +297,7 @@ export default function Home() {
         </div>
 
         {/* INNSTILLINGER */}
-        <Settings rows={rows} setRows={setRows} cols={cols} setCols={setCols} anchor={anchor} setAnchor={setAnchor} orientation={orientation} setOrientation={setOrientation} handleResetGrid={handleResetGrid} handleExport={handleExport} />
+        <Settings rows={rows} setRows={setRows} cols={cols} setCols={setCols} anchor={anchor} setAnchor={setAnchor} orientation={orientation} setOrientation={setOrientation} handleResetGrid={handleResetGrid} handleExport={handleExport} myRealm={myRealm} setMyRealm={setMyRealm} />
       </div>
 
       {/* SIDEBAR */}
