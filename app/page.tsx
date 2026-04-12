@@ -15,12 +15,14 @@ export default function Home() {
   // STANDARD ER NÅ EMPTY:
   const [roster, setRoster] = useState<any[]>([]);
   const [grid, setGrid] = useState<any[]>(Array(20).fill(null));
-
   const [wclCode, setWclCode] = useState("");
   const [isFetching, setIsFetching] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [sortBy, setSortBy] = useState("ALPHABETICAL");
   const [isLoaded, setIsLoaded] = useState(false);
+
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [dragOverMode, setDragOverMode] = useState<"swap" | "insert-before" | "insert-after">("swap");
 
   const [modal, setModal] = useState({
     isOpen: false,
@@ -105,11 +107,38 @@ export default function Home() {
       setGrid(prev => prev.map(p => p?.id === playerId ? { ...p, role: getNextRole(p.role || "DPS") } : p));
     }
   };
-
   const handleDragStart = (e: React.DragEvent, player: any, sourceIndex: number, source: string) => {
     e.dataTransfer.setData("player", JSON.stringify(player));
     e.dataTransfer.setData("sourceIndex", sourceIndex.toString());
     e.dataTransfer.setData("source", source);
+  };
+
+  const handleDragEnd = () => {
+    setDragOverIndex(null);
+    setDragOverMode("swap");
+  };
+
+  const handleDragOverCell = (e: React.DragEvent, index: number) => {
+    e.preventDefault();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    let mode: "swap" | "insert-before" | "insert-after";
+    if (orientation === "VERTICAL") {
+      // For vertikal: topp 25% = insert-before, bunn 25% = insert-after, midten = swap
+      const relY = e.clientY - rect.top;
+      const pct = relY / rect.height;
+      if (pct < 0.25) mode = "insert-before";
+      else if (pct > 0.75) mode = "insert-after";
+      else mode = "swap";
+    } else {
+      // For horisontal: venstre 25% = insert-before, høyre 25% = insert-after, midten = swap
+      const relX = e.clientX - rect.left;
+      const pct = relX / rect.width;
+      if (pct < 0.25) mode = "insert-before";
+      else if (pct > 0.75) mode = "insert-after";
+      else mode = "swap";
+    }
+    setDragOverIndex(index);
+    setDragOverMode(mode);
   };
 
   const handleDropOnGrid = (e: React.DragEvent, targetIndex: number) => {
@@ -118,20 +147,46 @@ export default function Home() {
     const player = JSON.parse(e.dataTransfer.getData("player"));
     const source = e.dataTransfer.getData("source");
     const sourceIndex = parseInt(e.dataTransfer.getData("sourceIndex"));
+    const mode = dragOverMode;
+
+    setDragOverIndex(null);
+    setDragOverMode("swap");
 
     let newGrid = [...grid];
     let newRoster = [...roster];
-    const existingPlayerInTarget = newGrid[targetIndex];
 
-    if (source === "roster") {
-      newGrid[targetIndex] = player;
-      newRoster = newRoster.filter(p => p.id !== player.id); 
-      if (existingPlayerInTarget) newRoster.push(existingPlayerInTarget);
-    } else if (source === "grid") {
-      newGrid[targetIndex] = player;
-      newGrid[sourceIndex] = existingPlayerInTarget;
+    if (mode === "swap") {
+      const existingPlayerInTarget = newGrid[targetIndex];
+      if (source === "roster") {
+        newGrid[targetIndex] = player;
+        newRoster = newRoster.filter(p => p.id !== player.id);
+        if (existingPlayerInTarget) newRoster.push(existingPlayerInTarget);
+      } else if (source === "grid") {
+        newGrid[targetIndex] = player;
+        newGrid[sourceIndex] = existingPlayerInTarget;
+      }
+    } else {
+      // Insert-modus: skyv spillere
+      const insertAt = mode === "insert-before" ? targetIndex : targetIndex + 1;
+
+      if (source === "grid") {
+        // Fjern spilleren fra kilden
+        newGrid.splice(sourceIndex, 1);
+        // Juster insertAt hvis nødvendig (vi fjernet et element før)
+        const adjustedInsert = sourceIndex < insertAt ? insertAt - 1 : insertAt;
+        newGrid.splice(adjustedInsert, 0, player);
+      } else if (source === "roster") {
+        newRoster = newRoster.filter(p => p.id !== player.id);
+        // Hvis vi setter inn på en null-plass, bare sett den direkte
+        // Ellers: skyv alle fra insertAt og fremover én plass
+        // og det siste elementet som faller ut (null eller spiller) havner i roster
+        const displaced = newGrid[newGrid.length - 1];
+        newGrid.splice(insertAt, 0, player);
+        newGrid = newGrid.slice(0, grid.length); // hold samme lengde
+        if (displaced) newRoster.push(displaced);
+      }
     }
-    
+
     setGrid(newGrid);
     setRoster(newRoster);
   };
@@ -274,25 +329,77 @@ export default function Home() {
   return (
     <main className="flex min-h-screen bg-slate-950 text-white p-8 font-sans" onDragOver={e => e.preventDefault()} onDrop={handleDropOutside}>
       <div className="flex-1 pr-8 flex flex-col">       
-        
-        {/* GRID */}
+          {/* GRID */}
         <div className="w-full max-w-4xl bg-slate-900 p-4 border border-slate-800 mb-6 shadow-lg">
           <div style={getGridStyle()} className="gap-2">
-            {grid.map((player, index) => (
-              <div key={index} onDragOver={e => e.preventDefault()} onDrop={(e) => handleDropOnGrid(e, index)} className="h-24 bg-slate-950 border border-slate-700 flex items-center justify-center relative overflow-hidden group hover:border-slate-500" style={{ direction: "ltr" }}>
-                <span className="absolute top-1 left-2 text-xs text-slate-600 font-mono">{index + 1}</span>
-                {player ? (
-                  <div draggable onDragStart={(e) => handleDragStart(e, player, index, "grid")} className={`w-full h-full flex flex-col items-center justify-center cursor-grab active:cursor-grabbing bg-slate-800 border-2 border-transparent hover:border-slate-500 ${player.color} relative`}>
-                    <button onClick={(e) => handleToggleRole(e, player.id, "grid")} className="absolute top-1 right-2 p-1 hover:bg-slate-700 opacity-70 hover:opacity-100" title="Klikk for å bytte rolle">
-                      {getRoleIcon(player.role || "DPS")}
-                    </button>
-                    <span className="font-semibold drop-shadow-md">{player.name}</span>
-                  </div>
-                ) : (
-                  <span className="text-slate-600 text-sm italic opacity-50">Empty</span>
-                )}
-              </div>
-            ))}
+            {grid.map((player, index) => {
+              const isSwapTarget = dragOverIndex === index && dragOverMode === "swap";
+              const isInsertBefore = dragOverIndex === index && dragOverMode === "insert-before";
+              const isInsertAfter = dragOverIndex === index && dragOverMode === "insert-after";
+              const isVertical = orientation === "VERTICAL";
+
+              return (
+                <div
+                  key={index}
+                  onDragOver={(e) => handleDragOverCell(e, index)}
+                  onDragLeave={(e) => {
+                    // Bare reset hvis vi forlater cellen helt (ikke til et child-element)
+                    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                      setDragOverIndex(null);
+                      setDragOverMode("swap");
+                    }
+                  }}
+                  onDrop={(e) => handleDropOnGrid(e, index)}
+                  className={[
+                    "h-24 bg-slate-950 border flex items-center justify-center relative overflow-visible group",
+                    isSwapTarget
+                      ? "border-blue-400 shadow-[0_0_0_2px_rgba(96,165,250,0.5)]"
+                      : "border-slate-700 hover:border-slate-500",
+                  ].join(" ")}
+                  style={{ direction: "ltr" }}
+                >
+                  {/* Insert-before indikator */}
+                  {isInsertBefore && (
+                    <div className={[
+                      "absolute z-20 bg-green-400 rounded-full pointer-events-none",
+                      isVertical
+                        ? "top-0 left-1 right-1 h-0.5 -translate-y-1/2"
+                        : "left-0 top-1 bottom-1 w-0.5 -translate-x-1/2"
+                    ].join(" ")} />
+                  )}
+                  {/* Insert-after indikator */}
+                  {isInsertAfter && (
+                    <div className={[
+                      "absolute z-20 bg-green-400 rounded-full pointer-events-none",
+                      isVertical
+                        ? "bottom-0 left-1 right-1 h-0.5 translate-y-1/2"
+                        : "right-0 top-1 bottom-1 w-0.5 translate-x-1/2"
+                    ].join(" ")} />
+                  )}
+
+                  <span className="absolute top-1 left-2 text-xs text-slate-600 font-mono">{index + 1}</span>
+                  {player ? (
+                    <div
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, player, index, "grid")}
+                      onDragEnd={handleDragEnd}
+                      className={[
+                        "w-full h-full flex flex-col items-center justify-center cursor-grab active:cursor-grabbing bg-slate-800 border-2 relative",
+                        isSwapTarget ? "border-blue-400" : "border-transparent hover:border-slate-500",
+                        player.color,
+                      ].join(" ")}
+                    >
+                      <button onClick={(e) => handleToggleRole(e, player.id, "grid")} className="absolute top-1 right-2 p-1 hover:bg-slate-700 opacity-70 hover:opacity-100" title="Klikk for å bytte rolle">
+                        {getRoleIcon(player.role || "DPS")}
+                      </button>
+                      <span className="font-semibold drop-shadow-md">{player.name}</span>
+                    </div>
+                  ) : (
+                    <span className="text-slate-600 text-sm italic opacity-50">Empty</span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
 
