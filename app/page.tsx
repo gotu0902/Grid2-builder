@@ -4,6 +4,9 @@ import { classColors, getRoleIcon } from "./components/Icons";
 import Settings from "./components/Settings";
 import Sidebar from "./components/Sidebar";
 import Modal from "./components/Modal";
+import SortSettingsModal, { SortConfig, DEFAULT_SORT_CONFIG, SortCategory } from "./components/SortSettingsModal";
+import ImportModal, { ResolvedPlayer } from "./components/ImportModal";
+import LayoutsModal, { SavedLayout } from "./components/LayoutsModal";
 
 export default function Home() {
   const [rows, setRows] = useState(5);
@@ -12,7 +15,6 @@ export default function Home() {
   const [orientation, setOrientation] = useState("HORIZONTAL");
   const [myRealm, setMyRealm] = useState("Tarren Mill");
   
-  // STANDARD ER NÅ EMPTY:
   const [roster, setRoster] = useState<any[]>([]);
   const [grid, setGrid] = useState<any[]>(Array(20).fill(null));
   const [wclCode, setWclCode] = useState("");
@@ -23,6 +25,13 @@ export default function Home() {
 
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [dragOverMode, setDragOverMode] = useState<"swap" | "insert-before" | "insert-after">("swap");
+
+  // Nye states
+  const [sortConfig, setSortConfig] = useState<SortConfig>(DEFAULT_SORT_CONFIG);
+  const [sortSettingsOpen, setSortSettingsOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [layoutsOpen, setLayoutsOpen] = useState(false);
+  const [savedLayouts, setSavedLayouts] = useState<SavedLayout[]>([]);
 
   const [modal, setModal] = useState({
     isOpen: false,
@@ -44,6 +53,8 @@ export default function Home() {
     const savedAnchor = localStorage.getItem("raidAnchor");
     const savedOrientation = localStorage.getItem("raidOrientation");
     const savedRealm = localStorage.getItem("raidMyRealm");
+    const savedSortConfig = localStorage.getItem("raidSortConfig");
+    const savedLayoutsList = localStorage.getItem("raidLayouts");
 
     if (savedGrid) setGrid(JSON.parse(savedGrid));
     if (savedRoster) setRoster(JSON.parse(savedRoster));
@@ -52,6 +63,38 @@ export default function Home() {
     if (savedAnchor) setAnchor(savedAnchor);
     if (savedOrientation) setOrientation(savedOrientation);
     if (savedRealm) setMyRealm(savedRealm);
+    if (savedSortConfig) {
+      try {
+        const parsed = JSON.parse(savedSortConfig);
+        // Merge med default så nye klasser fra framtidige oppdateringer blir med
+        const knownClasses = Object.keys(classColors);
+        const storedClasses = parsed.classPriority || [];
+        const missing = knownClasses.filter((c: string) => !storedClasses.includes(c));
+        const cleaned = storedClasses.filter((c: string) => knownClasses.includes(c));
+        // Migrer gammel order som inneholdt MELEE/RANGED → kollaps til DPS.
+        // Dedup'er men beholder rekkefølgen på første forekomst.
+        const rawOrder: string[] = parsed.order || DEFAULT_SORT_CONFIG.order;
+        const migratedOrder: SortCategory[] = [];
+        for (const c of rawOrder) {
+          const mapped = (c === "MELEE" || c === "RANGED") ? "DPS" : c;
+          if ((mapped === "TANK" || mapped === "DPS" || mapped === "HEALER") && !migratedOrder.includes(mapped as SortCategory)) {
+            migratedOrder.push(mapped as SortCategory);
+          }
+        }
+        // Hvis migrert order mangler noen kategorier, fyll på med defaults
+        for (const cat of DEFAULT_SORT_CONFIG.order) {
+          if (!migratedOrder.includes(cat)) migratedOrder.push(cat);
+        }
+        setSortConfig({
+          order: migratedOrder,
+          classPriority: [...cleaned, ...missing],
+          onlyGroupDpsClasses: parsed.onlyGroupDpsClasses ?? DEFAULT_SORT_CONFIG.onlyGroupDpsClasses,
+        });
+      } catch {}
+    }
+    if (savedLayoutsList) {
+      try { setSavedLayouts(JSON.parse(savedLayoutsList)); } catch {}
+    }
 
     setIsLoaded(true);
   }, []);
@@ -65,8 +108,10 @@ export default function Home() {
       localStorage.setItem("raidAnchor", anchor);
       localStorage.setItem("raidOrientation", orientation);
       localStorage.setItem("raidMyRealm", myRealm);
+      localStorage.setItem("raidSortConfig", JSON.stringify(sortConfig));
+      localStorage.setItem("raidLayouts", JSON.stringify(savedLayouts));
     }
-  }, [grid, roster, rows, cols, anchor, orientation, myRealm,isLoaded]);
+  }, [grid, roster, rows, cols, anchor, orientation, myRealm, sortConfig, savedLayouts, isLoaded]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -77,20 +122,25 @@ export default function Home() {
     });
   }, [rows, cols, isLoaded]);
 
+  // Delt WCL-henting: både for sidebar og ImportModal
+  const fetchPlayersFromWCL = async (reportCode: string): Promise<any[]> => {
+    const res = await fetch("/api/wcl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reportCode })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return data.players;
+  };
+
   const fetchFromWCL = async () => {
     if (!wclCode) return showAlert("Missing ID", "Please enter a WCL log ID first.");
     setIsFetching(true);
     try {
-      const res = await fetch("/api/wcl", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reportCode: wclCode })
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      
-      setRoster(data.players);
-      showAlert("Success!", `Found ${data.players.length} players! Roster updated.`);
+      const players = await fetchPlayersFromWCL(wclCode);
+      setRoster(players);
+      showAlert("Success!", `Found ${players.length} players! Roster updated.`);
     } catch (err: any) {
       showAlert("Error fetching data", err.message);
     } finally {
@@ -123,14 +173,12 @@ export default function Home() {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     let mode: "swap" | "insert-before" | "insert-after";
     if (orientation === "VERTICAL") {
-      // For vertikal: topp 25% = insert-before, bunn 25% = insert-after, midten = swap
       const relY = e.clientY - rect.top;
       const pct = relY / rect.height;
       if (pct < 0.25) mode = "insert-before";
       else if (pct > 0.75) mode = "insert-after";
       else mode = "swap";
     } else {
-      // For horisontal: venstre 25% = insert-before, høyre 25% = insert-after, midten = swap
       const relX = e.clientX - rect.left;
       const pct = relX / rect.width;
       if (pct < 0.25) mode = "insert-before";
@@ -166,23 +214,17 @@ export default function Home() {
         newGrid[sourceIndex] = existingPlayerInTarget;
       }
     } else {
-      // Insert-modus: skyv spillere
       const insertAt = mode === "insert-before" ? targetIndex : targetIndex + 1;
 
       if (source === "grid") {
-        // Fjern spilleren fra kilden
         newGrid.splice(sourceIndex, 1);
-        // Juster insertAt hvis nødvendig (vi fjernet et element før)
         const adjustedInsert = sourceIndex < insertAt ? insertAt - 1 : insertAt;
         newGrid.splice(adjustedInsert, 0, player);
       } else if (source === "roster") {
         newRoster = newRoster.filter(p => p.id !== player.id);
-        // Hvis vi setter inn på en null-plass, bare sett den direkte
-        // Ellers: skyv alle fra insertAt og fremover én plass
-        // og det siste elementet som faller ut (null eller spiller) havner i roster
         const displaced = newGrid[newGrid.length - 1];
         newGrid.splice(insertAt, 0, player);
-        newGrid = newGrid.slice(0, grid.length); // hold samme lengde
+        newGrid = newGrid.slice(0, grid.length);
         if (displaced) newRoster.push(displaced);
       }
     }
@@ -270,6 +312,192 @@ export default function Home() {
     };
     setRoster(prev => [...prev, newPlayer]);
   };
+
+  // ======================================================
+  // AUTO-SORT: putter alle i roster + grid inn i griden,
+  // sortert etter rolle/class-prioritet fra sortConfig.
+  // ======================================================
+  const getPlayerCategory = (player: any): SortCategory => {
+    const role = player.role || "DPS";
+    if (role === "TANK") return "TANK";
+    if (role === "HEALER") return "HEALER";
+    return "DPS";
+  };
+
+  const runAutoSort = (cfg: SortConfig, opts: { alertIfOverflow?: boolean } = {}) => {
+    const everyone = [...grid.filter(p => p !== null), ...roster];
+    if (everyone.length === 0) {
+      if (opts.alertIfOverflow) showAlert("No players", "Add some players to the roster first.");
+      return;
+    }
+
+    const gridSize = rows * cols;
+    const buckets: Record<SortCategory, any[]> = { TANK: [], DPS: [], HEALER: [] };
+    for (const p of everyone) buckets[getPlayerCategory(p)].push(p);
+
+    const classRank = (cls: string) => {
+      const idx = cfg.classPriority.indexOf(cls);
+      return idx === -1 ? 999 : idx;
+    };
+
+    // Sortering innen hver bucket basert på class priority.
+    // Samme klasse + samme rolle grupperes alltid sammen.
+    const sortBucket = (bucket: any[], applyClassPriority: boolean) => {
+      return [...bucket].sort((a, b) => {
+        if (applyClassPriority) {
+          const ra = classRank(a.class);
+          const rb = classRank(b.class);
+          if (ra !== rb) return ra - rb;
+        } else {
+          // Grupper fortsatt samme klasse sammen, men alfabetisk
+          const ca = (a.class || "").localeCompare(b.class || "", "en");
+          if (ca !== 0) return ca;
+        }
+        return a.name.localeCompare(b.name, "no");
+      });
+    };
+
+    // "onlyGroupDpsClasses": class priority gjelder BARE DPS-bucketen.
+    // TANK og HEALER grupperes fortsatt per klasse, men uten å følge prio-listen.
+    const applyToDpsOnly = cfg.onlyGroupDpsClasses;
+    const sorted: Record<SortCategory, any[]> = {
+      TANK: sortBucket(buckets.TANK, !applyToDpsOnly),
+      DPS: sortBucket(buckets.DPS, true),
+      HEALER: sortBucket(buckets.HEALER, !applyToDpsOnly),
+    };
+
+    // Flett sammen i henhold til rollerekkefølge
+    const finalList: any[] = [];
+    for (const cat of cfg.order) finalList.push(...sorted[cat]);
+
+    // Fyll griden — overflod går tilbake til rosteren
+    const newGrid: any[] = Array(gridSize).fill(null);
+    const newRoster: any[] = [];
+    finalList.forEach((p, i) => {
+      if (i < gridSize) newGrid[i] = p;
+      else newRoster.push(p);
+    });
+
+    setGrid(newGrid);
+    setRoster(newRoster);
+
+    if (opts.alertIfOverflow && newRoster.length > 0) {
+      showAlert("Sorted", `Filled ${gridSize} slots. ${newRoster.length} extra players went back to the roster.`);
+    }
+  };
+
+  const handleAutoSort = () => runAutoSort(sortConfig, { alertIfOverflow: true });
+
+  // ======================================================
+  // IMPORT
+  // ======================================================
+  const handleImportComplete = (placements: (ResolvedPlayer | null)[]) => {
+    const gridSize = rows * cols;
+    const newGrid: any[] = Array(gridSize).fill(null);
+    placements.forEach((p, i) => {
+      if (i < gridSize && p) newGrid[i] = p;
+    });
+    // Spillere som ikke fikk plass i griden (bare hvis importerte > gridSize)
+    const extras = placements.slice(gridSize).filter((p): p is ResolvedPlayer => p !== null);
+
+    setGrid(newGrid);
+
+    // Behold eksisterende rosters-spillere som ikke står i den nye griden
+    // og legg til de importerte som ikke fikk plass. Dedup på navn+server.
+    const normalize = (s: string) => s.replace(/\s+/g, "").toLowerCase();
+    const key = (p: any) => normalize(p.name) + "|" + normalize(p.server || "");
+
+    setRoster(prev => {
+      const gridKeys = new Set(newGrid.filter(Boolean).map(key));
+      // fjern roster-spillere som nå står i grid
+      const kept = prev.filter(p => !gridKeys.has(key(p)));
+      // legg til extras, uten duplikater
+      const merged = [...kept];
+      const seen = new Set(kept.map(key));
+      for (const e of extras) {
+        const k = key(e);
+        if (!seen.has(k)) { merged.push(e); seen.add(k); }
+      }
+      return merged;
+    });
+
+    setImportOpen(false);
+    const placed = placements.slice(0, gridSize).filter(Boolean).length;
+    showAlert(
+      "Imported!",
+      `Placed ${placed} players into the grid.` +
+      (extras.length > 0 ? `\n\n${extras.length} extra didn't fit — they went to the roster.` : "")
+    );
+  };
+
+  // ======================================================
+  // LAYOUTS
+  // ======================================================
+  const handleSaveLayout = (name: string) => {
+    const now = Date.now();
+    const newLayout: SavedLayout = {
+      id: "layout_" + now,
+      name,
+      createdAt: now,
+      updatedAt: now,
+      rows,
+      cols,
+      anchor,
+      orientation,
+      grid: [...grid],
+    };
+    setSavedLayouts(prev => [...prev, newLayout]);
+  };
+
+  const handleLoadLayout = (layout: SavedLayout) => {
+    showConfirm(
+      "Load layout",
+      `Load "${layout.name}"? The current grid will be replaced — anyone currently in the grid goes back to the roster.`,
+      () => {
+        const normalize = (s: string) => s.replace(/\s+/g, "").toLowerCase();
+        const key = (p: any) => normalize(p.name) + "|" + normalize(p.server || "");
+
+        const currentPlayers = grid.filter(p => p !== null);
+        const layoutPlayers = layout.grid.filter((p: any) => p !== null);
+        const layoutKeys = new Set(layoutPlayers.map(key));
+
+        // Slå sammen nåværende roster + nåværende grid, dedup, og fjern
+        // alle som skal stå i den nye griden.
+        setRoster(prev => {
+          const combined = [...prev, ...currentPlayers];
+          const seen = new Set<string>();
+          const unique: any[] = [];
+          for (const p of combined) {
+            const k = key(p);
+            if (!seen.has(k)) { seen.add(k); unique.push(p); }
+          }
+          return unique.filter(p => !layoutKeys.has(key(p)));
+        });
+
+        setRows(layout.rows);
+        setCols(layout.cols);
+        setAnchor(layout.anchor);
+        setOrientation(layout.orientation);
+        setGrid([...layout.grid]);
+        setLayoutsOpen(false);
+        closeModal();
+      }
+    );
+  };
+
+  const handleDeleteLayout = (id: string) => {
+    setSavedLayouts(prev => prev.filter(l => l.id !== id));
+  };
+
+  const handleOverwriteLayout = (id: string) => {
+    const now = Date.now();
+    setSavedLayouts(prev => prev.map(l =>
+      l.id === id
+        ? { ...l, updatedAt: now, rows, cols, anchor, orientation, grid: [...grid] }
+        : l
+    ));
+  };
+
   // ------------------------------
 
   const displayedRoster = roster
@@ -290,7 +518,6 @@ export default function Home() {
     });
 
   const handleExport = () => {
-    // Sjekk om realm er valgt
     if (!myRealm) {
       showAlert("Missing realm", "You have to choose your own realm, otherwise Grid will tell you to fuck off.");
       return;
@@ -302,12 +529,9 @@ export default function Home() {
       .filter(slot => slot !== null)
       .map(p => {
         if (!p.server) return p.name;
-        
-        // Sammenligner normaliserte servernavn
         if (normalize(p.server) === normalize(myRealm)) {
           return p.name;
         }
-
         return `${p.name}-${p.server}`;
       })
       .join(", ");
@@ -343,7 +567,6 @@ export default function Home() {
                   key={index}
                   onDragOver={(e) => handleDragOverCell(e, index)}
                   onDragLeave={(e) => {
-                    // Bare reset hvis vi forlater cellen helt (ikke til et child-element)
                     if (!e.currentTarget.contains(e.relatedTarget as Node)) {
                       setDragOverIndex(null);
                       setDragOverMode("swap");
@@ -358,7 +581,6 @@ export default function Home() {
                   ].join(" ")}
                   style={{ direction: "ltr" }}
                 >
-                  {/* Insert-before indikator */}
                   {isInsertBefore && (
                     <div className={[
                       "absolute z-20 bg-green-400 rounded-full pointer-events-none",
@@ -367,7 +589,6 @@ export default function Home() {
                         : "left-0 top-1 bottom-1 w-0.5 -translate-x-1/2"
                     ].join(" ")} />
                   )}
-                  {/* Insert-after indikator */}
                   {isInsertAfter && (
                     <div className={[
                       "absolute z-20 bg-green-400 rounded-full pointer-events-none",
@@ -404,7 +625,19 @@ export default function Home() {
         </div>
 
         {/* INNSTILLINGER */}
-        <Settings rows={rows} setRows={setRows} cols={cols} setCols={setCols} anchor={anchor} setAnchor={setAnchor} orientation={orientation} setOrientation={setOrientation} handleResetGrid={handleResetGrid} handleExport={handleExport} myRealm={myRealm} setMyRealm={setMyRealm} />
+        <Settings
+          rows={rows} setRows={setRows}
+          cols={cols} setCols={setCols}
+          anchor={anchor} setAnchor={setAnchor}
+          orientation={orientation} setOrientation={setOrientation}
+          myRealm={myRealm} setMyRealm={setMyRealm}
+          handleResetGrid={handleResetGrid}
+          handleExport={handleExport}
+          handleAutoSort={handleAutoSort}
+          handleOpenSortSettings={() => setSortSettingsOpen(true)}
+          handleOpenImport={() => setImportOpen(true)}
+          handleOpenLayouts={() => setLayoutsOpen(true)}
+        />
       </div>
 
       {/* SIDEBAR */}
@@ -434,6 +667,44 @@ export default function Home() {
         type={modal.type}
         onClose={closeModal}
         onConfirm={modal.onConfirm}
+      />
+
+      {/* SORT SETTINGS MODAL */}
+      <SortSettingsModal
+        isOpen={sortSettingsOpen}
+        config={sortConfig}
+        onClose={() => setSortSettingsOpen(false)}
+        onSave={(cfg) => { setSortConfig(cfg); setSortSettingsOpen(false); }}
+        onApply={(cfg) => {
+          setSortConfig(cfg);
+          setSortSettingsOpen(false);
+          runAutoSort(cfg, { alertIfOverflow: true });
+        }}
+      />
+
+      {/* IMPORT MODAL */}
+      <ImportModal
+        isOpen={importOpen}
+        myRealm={myRealm}
+        onClose={() => setImportOpen(false)}
+        onImport={handleImportComplete}
+        fetchFromWCLById={fetchPlayersFromWCL}
+      />
+
+      {/* LAYOUTS MODAL */}
+      <LayoutsModal
+        isOpen={layoutsOpen}
+        layouts={savedLayouts}
+        currentGrid={grid}
+        currentRows={rows}
+        currentCols={cols}
+        currentAnchor={anchor}
+        currentOrientation={orientation}
+        onClose={() => setLayoutsOpen(false)}
+        onSave={handleSaveLayout}
+        onLoad={handleLoadLayout}
+        onDelete={handleDeleteLayout}
+        onOverwrite={handleOverwriteLayout}
       />
     </main>
   );
